@@ -4,12 +4,35 @@ import {
 } from "discourse/tests/helpers/qunit-helpers";
 import { test } from "qunit";
 
+function usersFixture() {
+  return [
+    {
+      id: 1,
+      username: "bruce0",
+      name: "Bruce Wayne",
+      avatar_template: "/letter_avatar_proxy/v4/letter/b/90ced4/{size}.png",
+    },
+    {
+      id: 2,
+      username: "bruce1",
+      name: "Bruce Wayne",
+      avatar_template: "/letter_avatar_proxy/v4/letter/b/9de053/{size}.png",
+    },
+    {
+      id: 3,
+      username: "bruce2",
+      name: "Bruce Wayne",
+      avatar_template: "/letter_avatar_proxy/v4/letter/b/35a633/{size}.png",
+    },
+  ];
+}
 acceptance("Presence - Subscribing", function (needs) {
   needs.pretender((server, helper) => {
     server.get("/presence/get", () => {
       return helper.response({
-        users: [1, 2, 3],
+        count: 3,
         last_message_id: 1,
+        users: usersFixture(),
       });
     });
   });
@@ -20,7 +43,7 @@ acceptance("Presence - Subscribing", function (needs) {
     assert.equal(channel.name, "mychannel");
 
     await channel.subscribe({
-      users: [1, 2, 3],
+      users: usersFixture(),
       last_message_id: 1,
     });
 
@@ -29,8 +52,7 @@ acceptance("Presence - Subscribing", function (needs) {
     publishToMessageBus(
       "/presence/mychannel",
       {
-        type: "leave",
-        user_id: 1,
+        leaving_user_ids: [1],
       },
       0,
       2
@@ -41,8 +63,7 @@ acceptance("Presence - Subscribing", function (needs) {
     publishToMessageBus(
       "/presence/mychannel",
       {
-        type: "enter",
-        user_id: 1,
+        entering_users: [usersFixture()[0]],
       },
       0,
       3
@@ -62,8 +83,7 @@ acceptance("Presence - Subscribing", function (needs) {
     publishToMessageBus(
       "/presence/mychannel",
       {
-        type: "leave",
-        user_id: 1,
+        leaving_user_ids: [1],
       },
       0,
       2
@@ -78,8 +98,7 @@ acceptance("Presence - Subscribing", function (needs) {
     publishToMessageBus(
       "/presence/mychannel",
       {
-        type: "leave",
-        user_id: 2,
+        leaving_user_ids: [2],
       },
       0,
       99

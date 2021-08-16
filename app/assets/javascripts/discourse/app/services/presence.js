@@ -5,6 +5,7 @@ import { cancel, later, throttle } from "@ember/runloop";
 import Session from "discourse/models/session";
 import { Promise } from "rsvp";
 import { isTesting } from "discourse-common/config/environment";
+import User from "discourse/models/user";
 
 const PRESENCE_INTERVAL_S = 30;
 const PRESENCE_THROTTLE_MS = 100;
@@ -101,12 +102,14 @@ class PresenceChannel extends EmberObject {
       this.lastSeenId = message_id;
     }
 
-    if (data.type === "leave") {
-      this.users.removeObject(data.user_id);
-    } else if (data.type === "enter") {
-      this.users.addObject(data.user_id);
-    } else {
-      throw `Unknown message type: ${data}`;
+    if (data.entering_users) {
+      const users = data.entering_users.map((u) => User.create(u));
+      this.users.addObjects(users);
+    }
+    if (data.leaving_user_ids) {
+      const leavingIds = new Set(data.leaving_user_ids);
+      const toRemove = this.users.filter((u) => leavingIds.has(u.id));
+      this.users.removeObjects(toRemove);
     }
   }
 }

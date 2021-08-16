@@ -10,11 +10,7 @@ class PresenceController < ApplicationController
     message_bus_channel_name = channel.message_bus_channel_name
 
     state = channel.state
-
-    render json: {
-      users: state.user_ids,
-      last_message_id: state.message_bus_last_id
-    }
+    render json: state, serializer: PresenceChannelStateSerializer, root: nil
   end
 
   def update

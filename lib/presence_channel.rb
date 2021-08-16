@@ -2,6 +2,8 @@
 
 class PresenceChannel
   class State
+    include ActiveModel::Serialization
+
     attr_reader :message_bus_last_id
     attr_reader :user_ids
     attr_reader :count
@@ -11,6 +13,10 @@ class PresenceChannel
       @message_bus_last_id = message_bus_last_id
       @user_ids = user_ids
       @count = count || user_ids.count
+    end
+
+    def users
+      User.where(id: user_ids)
     end
   end
 
@@ -33,7 +39,7 @@ class PresenceChannel
     )
 
     if result == 1
-      publish_message(type: "enter", user_id: user_id)
+      publish_message(entering_user_ids: [user_id])
     end
 
     auto_leave
@@ -47,7 +53,7 @@ class PresenceChannel
     )
 
     if result == 1
-      publish_message(type: "leave", user_id: user_id)
+      publish_message(leaving_user_ids: [user_id])
     end
 
     auto_leave
@@ -95,10 +101,9 @@ class PresenceChannel
       [name, Time.zone.now.to_i]
     )
 
-    left_user_ids.each do |user_id|
-      publish_message(type: "leave", user_id: user_id)
+    if !left_user_ids.empty?
+      publish_message(leaving_user_ids: left_user_ids)
     end
-
   end
 
   # Clear all members of the channel. This is intended for debugging/development only
@@ -110,13 +115,16 @@ class PresenceChannel
 
   private
 
-  def publish_message(type:, user_id:)
-    message = {
-      "type" => type,
-      "user_id" => user_id,
-    }
+  def publish_message(entering_user_ids: nil, leaving_user_ids: nil)
+    message = {}
+    message["leaving_user_ids"] = leaving_user_ids if leaving_user_ids.present?
 
-    MessageBus.publish(message_bus_channel_name, message)
+    if entering_user_ids.present?
+      users = User.where(id: entering_user_ids)
+      message["entering_users"] = ActiveModel::ArraySerializer.new(users, each_serializer: BasicUserSerializer)
+    end
+
+    MessageBus.publish(message_bus_channel_name, message.as_json)
   end
 
   # The redis key which MessageBus uses to store the 'last_id' for the channel
