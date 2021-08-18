@@ -6,8 +6,17 @@ class PresenceController < ApplicationController
 
   def get
     name = params.require(:channel)
-    channel = PresenceChannel.new(name)
-    message_bus_channel_name = channel.message_bus_channel_name
+
+    begin
+      channel = PresenceChannel.new(name)
+    rescue PresenceChannel::NotFound
+      raise Discourse::NotFound
+    end
+
+    if !channel.can_view?(user_id: current_user&.id)
+      # Do not reveal existence of channel
+      raise Discourse::NotFound
+    end
 
     state = channel.state
     render json: state, serializer: PresenceChannelStateSerializer, root: nil
@@ -27,15 +36,22 @@ class PresenceController < ApplicationController
       raise Discourse::InvalidParameters.new(:leave_channels)
     end
 
+    response = {}
+
     present_channels&.each do |name|
-      PresenceChannel.new(name).present(user_id: current_user.id, client_id: params[:client_id])
+      PresenceChannel.new(name).present(user_id: current_user&.id, client_id: params[:client_id])
+      response[name] = true
+    rescue PresenceChannel::NotFound, PresenceChannel::InvalidAccess
+      response[name] = false
     end
 
     leave_channels&.each do |name|
-      PresenceChannel.new(name).leave(user_id: current_user.id, client_id: params[:client_id])
+      PresenceChannel.new(name).leave(user_id: current_user&.id, client_id: params[:client_id])
+    rescue PresenceChannel::NotFound
+      # Do nothing. Don't reveal that this channel doesn't exist
     end
 
-    render json: success_json
+    render json: response
   end
 
 end

@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 class PresenceChannel
+  class NotFound < StandardError; end
+  class InvalidAccess < StandardError; end
+  class ConfigNotLoaded < StandardError; end
+  class InvalidConfig < StandardError; end
+
   class State
     include ActiveModel::Serialization
 
@@ -20,18 +25,78 @@ class PresenceChannel
     end
   end
 
+  # Class for managing config of PresenceChannel
+  # Three parameters can be provided on initialization:
+  #   public: boolean value. If true, channel information is visible to all users (default false)
+  #   allowed_user_ids: array of user_ids that can view, and become present in, the channel (default [])
+  #   allowed_group_ids: array of group_ids that can view, and become present in, the channel (default [])
+  class Config
+    NOT_FOUND ||= "notfound"
+    attr_reader :public, :allowed_user_ids, :allowed_group_ids
+
+    def initialize(public: false, allowed_user_ids: nil, allowed_group_ids: nil)
+      @public = public
+      @allowed_user_ids = allowed_user_ids
+      @allowed_group_ids = allowed_group_ids
+    end
+
+    def self.from_json(json)
+      data = JSON.parse(json, symbolize_names: true)
+      data = {} if !data.is_a? Hash
+      new(**data.slice(:public, :allowed_user_ids, :allowed_group_ids))
+    end
+
+    def to_json
+      data = { public: public }
+      data[:allowed_user_ids] = allowed_user_ids if allowed_user_ids
+      data[:allowed_group_ids] = allowed_group_ids if allowed_group_ids
+      data.to_json
+    end
+  end
+
   DEFAULT_TIMEOUT ||= 60
+  CONFIG_CACHE_SECONDS ||= 120
   GC_SECONDS ||= 24.hours.to_i
 
-  attr_reader :name, :timeout, :message_bus_channel_name
+  @@configuration_blocks ||= {}
 
-  def initialize(name, timeout: nil)
+  attr_reader :name, :timeout, :message_bus_channel_name, :config
+
+  def initialize(name, raise_not_found: true)
     @name = name
-    @timeout = timeout || DEFAULT_TIMEOUT
-    @message_bus_channel_name = "/presence/#{name}"
+    @timeout = DEFAULT_TIMEOUT
+    @message_bus_channel_name = "/presence#{name}"
+
+    begin
+      @config = fetch_config
+    rescue PresenceChannel::NotFound
+      raise if raise_not_found
+      @config = Config.new
+    end
+  end
+
+  # Is this user allowed to view this channel?
+  # Pass `nil` for anonymous viewers
+  def can_view?(user_id: nil)
+    return true if config.public
+    return true if user_id && config.allowed_user_ids&.include?(user_id)
+    if user_id && config.allowed_group_ids.present?
+      user_group_ids = GroupUser.where(user_id: user_id).pluck("group_id")
+      return true if (user_group_ids & config.allowed_group_ids).present?
+    end
+    false
+  end
+
+  # Is a user allowed to enter this channel?
+  # Currently equal to the the can_view? permission
+  def can_enter?(user_id: nil)
+    return false if user_id.nil?
+    can_view?(user_id: user_id)
   end
 
   def present(user_id:, client_id:)
+    raise PresenceChannel::InvalidAccess if !can_enter?(user_id: user_id)
+
     result = PresenceChannel.redis.eval(
       PRESENT_LUA,
       redis_keys,
@@ -110,10 +175,41 @@ class PresenceChannel
   def clear
     PresenceChannel.redis.del(redis_key_zlist)
     PresenceChannel.redis.del(redis_key_hash)
+    PresenceChannel.redis.del(redis_key_config)
     PresenceChannel.redis.zrem(self.class.redis_key_channel_list, name)
   end
 
   private
+
+  def fetch_config
+    cached_config = PresenceChannel.redis.get(redis_key_config)
+
+    if cached_config == Config::NOT_FOUND
+      raise PresenceChannel::NotFound
+    elsif cached_config
+      Config.from_json(cached_config)
+    else
+      prefix = name[/\/([a-zA-Z0-9_-]+)\/.*/, 1]
+      raise PresenceChannel::NotFound if prefix.nil?
+
+      config_block = @@configuration_blocks[prefix]
+      config_block ||= DiscoursePluginRegistry.presence_channel_prefixes.find { |t| t[0] == prefix }&.[](1)
+      raise PresenceChannel::NotFound if config_block.nil?
+
+      result = config_block.call(name)
+      to_cache = if result.is_a? Config
+        result.to_json
+      elsif result.nil?
+        Config::NOT_FOUND
+      else
+        raise InvalidConfig.new "Expected PresenceChannel::Config or nil. Got a #{result.class.name}"
+      end
+      PresenceChannel.redis.set(redis_key_config, to_cache, ex: CONFIG_CACHE_SECONDS)
+
+      raise PresenceChannel::NotFound if result.nil?
+      result
+    end
+  end
 
   def publish_message(entering_user_ids: nil, leaving_user_ids: nil)
     message = {}
@@ -124,7 +220,19 @@ class PresenceChannel
       message["entering_users"] = ActiveModel::ArraySerializer.new(users, each_serializer: BasicUserSerializer)
     end
 
-    MessageBus.publish(message_bus_channel_name, message.as_json)
+    params = {}
+
+    if config.public
+      # no params required
+    elsif config.allowed_user_ids || config.allowed_group_ids
+      params[:user_ids] = config.allowed_user_ids
+      params[:group_ids] = config.allowed_group_ids
+    else
+      # nobody is allowed... don't publish anything
+      return
+    end
+
+    MessageBus.publish(message_bus_channel_name, message.as_json, **params)
   end
 
   # The redis key which MessageBus uses to store the 'last_id' for the channel
@@ -154,6 +262,13 @@ class PresenceChannel
     Discourse.redis.namespace_key("_presence_#{name}_hash")
   end
 
+  # The hash contains a map of user_id => session_count
+  # when the count for a user reaches 0, the key is deleted
+  # We use this hash to efficiently count the number of present users
+  def redis_key_config
+    Discourse.redis.namespace_key("_presence_#{name}_config")
+  end
+
   # This list contains all active presence channels, ranked with the expiration timestamp of their least-recently-seen  client_id
   # We periodically check the 'lowest ranked' items in this list based on the `timeout` of the channel
   def self.redis_key_channel_list
@@ -165,7 +280,7 @@ class PresenceChannel
   def self.auto_leave_all
     channels_with_expiring_members = PresenceChannel.redis.zrangebyscore(redis_key_channel_list, '-inf', Time.zone.now.to_i)
     channels_with_expiring_members.each do |name|
-      new(name).auto_leave
+      new(name, raise_not_found: false).auto_leave
     end
   end
 
@@ -173,8 +288,11 @@ class PresenceChannel
   def self.clear_all!
     channels = PresenceChannel.redis.zrangebyscore(redis_key_channel_list, '-inf', '+inf')
     channels.each do |name|
-      new(name).clear
+      new(name, raise_not_found: false).clear
     end
+
+    config_cache_keys = PresenceChannel.redis.scan_each(match: Discourse.redis.namespace_key("_presence_*_config")).to_a
+    PresenceChannel.redis.del(*config_cache_keys) if config_cache_keys.present?
   end
 
   # Shortcut to access a redis client for all PresenceChannel activities.
@@ -189,6 +307,29 @@ class PresenceChannel
     else
       raise "PresenceChannel is unable to access MessageBus's Redis instance"
     end
+  end
+
+  # Register a callback to configure channels with a given prefix
+  # Prefix must match [a-zA-Z0-9_-]+
+  # e.g. `register_prefix("topic-reply") do ... end` will be called for
+  #      all channels starting `/topic-reply/...`
+  #
+  # At runtime, the block will be passed a full channel name. If the channel
+  # should not exist, the block should return `nil`. If the channel should exist,
+  # the block should return a PresenceChannel::Config object
+  #
+  # Return values may be cached for up to 2 minutes
+  #
+  # Plugins should use the Plugin::Instance API instead
+  def self.register_prefix(prefix, &block)
+    raise "PresenceChannel prefix #{prefix} must match [a-zA-Z0-9_-]+" unless prefix.match? /[a-zA-Z0-9_-]+/
+    raise "PresenceChannel prefix #{prefix} already registered" if @@configuration_blocks&.[](prefix)
+    @@configuration_blocks[prefix] = block
+  end
+
+  def self.unregister_prefix(prefix)
+    raise "Only allowed in test environment" if !Rails.env.test?
+    @@configuration_blocks&.delete(prefix)
   end
 
   PARAMS_LUA = <<~LUA

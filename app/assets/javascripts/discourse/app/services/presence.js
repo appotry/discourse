@@ -19,6 +19,8 @@ function createPromiseProxy() {
   return promiseProxy;
 }
 
+class PresenceChannelNotFound extends Error {}
+
 class PresenceChannel extends EmberObject {
   init({ name, presenceService }) {
     super.init(...arguments);
@@ -55,11 +57,21 @@ class PresenceChannel extends EmberObject {
     }
 
     if (!initialData) {
-      initialData = await ajax("/presence/get", {
-        data: {
-          channel: this.name,
-        },
-      });
+      try {
+        initialData = await ajax("/presence/get", {
+          data: {
+            channel: this.name,
+          },
+        });
+      } catch (e) {
+        if (e.jqXHR?.status === 404) {
+          throw new PresenceChannelNotFound(
+            `PresenceChannel '${this.name}' not found`
+          );
+        } else {
+          throw e;
+        }
+      }
     }
     this.set("users", initialData.users);
     this.lastSeenId = initialData.last_message_id;
@@ -178,11 +190,11 @@ export default class PresenceService extends Service {
   }
 
   subscribe(channelName, callback, lastSeenId) {
-    this.messageBus.subscribe(`/presence/${channelName}`, callback, lastSeenId);
+    this.messageBus.subscribe(`/presence${channelName}`, callback, lastSeenId);
   }
 
   unsubscribe(channelName, callback) {
-    this.messageBus.unsubscribe(`/presence/${channelName}`, callback);
+    this.messageBus.unsubscribe(`/presence${channelName}`, callback);
   }
 
   _beaconLeaveAll() {
@@ -232,7 +244,7 @@ export default class PresenceService extends Service {
         .filter((e) => e.type === "leave")
         .map((e) => e.channel);
 
-      await ajax("/presence/update", {
+      const response = await ajax("/presence/update", {
         data: {
           client_id: this.messageBus.clientId,
           present_channels: [...this._presentChannels],
@@ -242,9 +254,15 @@ export default class PresenceService extends Service {
       });
 
       queue.forEach((e) => {
-        // TODO: Once we add security, some of
-        // these promises should be rejected
-        e.promiseProxy.resolve();
+        if (response[e.channel] === false) {
+          e.promiseProxy.reject(
+            new PresenceChannelNotFound(
+              `PresenceChannel '${e.channel}' not found`
+            )
+          );
+        } else {
+          e.promiseProxy.resolve();
+        }
       });
     } catch {
       // Updating server failed. Put the failed events

@@ -913,6 +913,10 @@ class Plugin::Instance
       }, self)
   end
 
+  def register_presence_channel_prefix(prefix, &block)
+    DiscoursePluginRegistry.register_presence_channel_prefix([prefix, block], self)
+  end
+
   protected
 
   def self.js_path
