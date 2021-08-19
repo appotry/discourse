@@ -48,12 +48,12 @@ describe PresenceChannel do
     channel1.present(user_id: user.id, client_id: 1)
     channel2.present(user_id: user.id, client_id: 2)
 
-    expect(channel3.user_ids).to eq([1])
+    expect(channel3.user_ids).to eq([user.id])
     expect(channel3.count).to eq(1)
 
     channel1.leave(user_id: user.id, client_id: 2)
 
-    expect(channel3.user_ids).to eq([1])
+    expect(channel3.user_ids).to eq([user.id])
     expect(channel3.count).to eq(1)
 
     channel2.leave(user_id: user.id, client_id: 1)
@@ -85,7 +85,7 @@ describe PresenceChannel do
     data = messages.map(&:data)
     expect(data.count).to eq(1)
     expect(data[0].keys).to contain_exactly("entering_users")
-    expect(data[0]["entering_users"].map { |u| u[:id] }).to contain_exactly(1)
+    expect(data[0]["entering_users"].map { |u| u[:id] }).to contain_exactly(user.id)
 
     freeze_time Time.zone.now + 1 + PresenceChannel::DEFAULT_TIMEOUT
 
@@ -96,7 +96,7 @@ describe PresenceChannel do
     data = messages.map(&:data)
     expect(data.count).to eq(1)
     expect(data[0].keys).to contain_exactly("leaving_user_ids")
-    expect(data[0]["leaving_user_ids"]).to contain_exactly(1)
+    expect(data[0]["leaving_user_ids"]).to contain_exactly(user.id)
   end
 
   it "can track active channels, and auto_leave_all successfully" do
@@ -119,12 +119,12 @@ describe PresenceChannel do
     end
 
     expect(messages.map { |m| [ m.channel, m.data ] }).to contain_exactly(
-      ["/presence/test/public1", { "leaving_user_ids" => [1] }],
-      ["/presence/test/public2", { "leaving_user_ids" => [1] }]
+      ["/presence/test/public1", { "leaving_user_ids" => [user.id] }],
+      ["/presence/test/public2", { "leaving_user_ids" => [user.id] }]
     )
 
     expect(channel1.user_ids).to eq([])
-    expect(channel2.user_ids).to eq([2])
+    expect(channel2.user_ids).to eq([user2.id])
   end
 
   it 'only sends one `enter` and `leave` message' do
@@ -138,7 +138,7 @@ describe PresenceChannel do
     data = messages.map(&:data)
     expect(data.count).to eq(1)
     expect(data[0].keys).to contain_exactly("entering_users")
-    expect(data[0]["entering_users"].map { |u| u[:id] }).to contain_exactly(1)
+    expect(data[0]["entering_users"].map { |u| u[:id] }).to contain_exactly(user.id)
 
     messages = MessageBus.track_publish(channel.message_bus_channel_name) do
       channel.leave(user_id: user.id, client_id: "a")
@@ -148,7 +148,7 @@ describe PresenceChannel do
     data = messages.map(&:data)
     expect(data.count).to eq(1)
     expect(data[0].keys).to contain_exactly("leaving_user_ids")
-    expect(data[0]["leaving_user_ids"]).to contain_exactly(1)
+    expect(data[0]["leaving_user_ids"]).to contain_exactly(user.id)
   end
 
   it "will return the messagebus last_id in the state payload" do
@@ -158,7 +158,7 @@ describe PresenceChannel do
     channel.present(user_id: user2.id, client_id: "a")
 
     state = channel.state
-    expect(state.user_ids).to contain_exactly(1, 2)
+    expect(state.user_ids).to contain_exactly(user.id, user2.id)
     expect(state.count).to eq(2)
     expect(state.message_bus_last_id).to eq(MessageBus.last_id(channel.message_bus_channel_name))
   end
