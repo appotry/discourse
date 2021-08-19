@@ -19,7 +19,7 @@ function createPromiseProxy() {
   return promiseProxy;
 }
 
-class PresenceChannelNotFound extends Error {}
+export class PresenceChannelNotFound extends Error {}
 
 class PresenceChannel extends EmberObject {
   init({ name, presenceService }) {
