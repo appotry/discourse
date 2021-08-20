@@ -27,6 +27,8 @@ describe PresenceChannel do
         PresenceChannel::Config.new(allowed_group_ids: [ group.id ])
       when "/test/noaccess"
         PresenceChannel::Config.new
+      when "/test/countonly"
+        PresenceChannel::Config.new(count_only: true, public: true)
       else
         nil
       end
@@ -229,5 +231,24 @@ describe PresenceChannel do
     end
     expect(messages.count).to eq(1)
     expect(messages[0].group_ids).to eq([group.id])
+  end
+
+  it 'publishes messages correctly in count_only mode' do
+    channel = PresenceChannel.new("/test/countonly")
+    messages = MessageBus.track_publish(channel.message_bus_channel_name) do
+      channel.present(user_id: user.id, client_id: "a")
+    end
+    expect(messages.count).to eq(1)
+    expect(messages[0].data).to eq({
+      "count_delta" => 1
+    })
+
+    messages = MessageBus.track_publish(channel.message_bus_channel_name) do
+      channel.leave(user_id: user.id, client_id: "a")
+    end
+    expect(messages.count).to eq(1)
+    expect(messages[0].data).to eq({
+      "count_delta" => -1
+    })
   end
 end

@@ -21,6 +21,7 @@ class PresenceChannel
     end
 
     def users
+      return nil if user_ids.nil?
       User.where(id: user_ids)
     end
   end
@@ -30,26 +31,29 @@ class PresenceChannel
   #   public: boolean value. If true, channel information is visible to all users (default false)
   #   allowed_user_ids: array of user_ids that can view, and become present in, the channel (default [])
   #   allowed_group_ids: array of group_ids that can view, and become present in, the channel (default [])
+  #   count_only: boolean. If true, user identities are never revealed to clients. (default [])
   class Config
     NOT_FOUND ||= "notfound"
-    attr_reader :public, :allowed_user_ids, :allowed_group_ids
+    attr_reader :public, :allowed_user_ids, :allowed_group_ids, :count_only
 
-    def initialize(public: false, allowed_user_ids: nil, allowed_group_ids: nil)
+    def initialize(public: false, allowed_user_ids: nil, allowed_group_ids: nil, count_only: false)
       @public = public
       @allowed_user_ids = allowed_user_ids
       @allowed_group_ids = allowed_group_ids
+      @count_only = count_only
     end
 
     def self.from_json(json)
       data = JSON.parse(json, symbolize_names: true)
       data = {} if !data.is_a? Hash
-      new(**data.slice(:public, :allowed_user_ids, :allowed_group_ids))
+      new(**data.slice(:public, :allowed_user_ids, :allowed_group_ids, :count_only))
     end
 
     def to_json
       data = { public: public }
       data[:allowed_user_ids] = allowed_user_ids if allowed_user_ids
       data[:allowed_group_ids] = allowed_group_ids if allowed_group_ids
+      data[:count_only] = count_only if count_only
       data.to_json
     end
   end
@@ -124,7 +128,7 @@ class PresenceChannel
     auto_leave
   end
 
-  def state(count_only: false)
+  def state(count_only: config.count_only)
     auto_leave
 
     if count_only
@@ -213,11 +217,17 @@ class PresenceChannel
 
   def publish_message(entering_user_ids: nil, leaving_user_ids: nil)
     message = {}
-    message["leaving_user_ids"] = leaving_user_ids if leaving_user_ids.present?
 
-    if entering_user_ids.present?
-      users = User.where(id: entering_user_ids)
-      message["entering_users"] = ActiveModel::ArraySerializer.new(users, each_serializer: BasicUserSerializer)
+    if config.count_only
+      message["count_delta"] = entering_user_ids&.count || 0
+      message["count_delta"] -= leaving_user_ids&.count || 0
+      return if message["count_delta"] == 0
+    else
+      message["leaving_user_ids"] = leaving_user_ids if leaving_user_ids.present?
+      if entering_user_ids.present?
+        users = User.where(id: entering_user_ids)
+        message["entering_users"] = ActiveModel::ArraySerializer.new(users, each_serializer: BasicUserSerializer)
+      end
     end
 
     params = {}

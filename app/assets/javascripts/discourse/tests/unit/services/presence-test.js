@@ -36,6 +36,11 @@ acceptance("Presence - Subscribing", function (needs) {
           last_message_id: 1,
           users: usersFixture(),
         });
+      } else if (request.queryParams.channel?.startsWith("/countonly/")) {
+        return helper.response({
+          count: 3,
+          last_message_id: 1,
+        });
       }
 
       return helper.response(404, {});
@@ -126,6 +131,45 @@ acceptance("Presence - Subscribing", function (needs) {
       channel.subscribe(),
       PresenceChannelNotFound,
       "raises not found"
+    );
+  });
+
+  test("can subscribe to count_only channel", async function (assert) {
+    let presenceService = this.container.lookup("service:presence");
+    let channel = presenceService.getChannel("/countonly/ch1");
+
+    await channel.subscribe();
+
+    assert.equal(channel.count, 3, "has the correct count");
+    assert.equal(channel.countOnly, true, "identifies as countOnly");
+    assert.equal(channel.users, null, "has null users list");
+
+    publishToMessageBus(
+      "/presence/countonly/ch1",
+      {
+        count_delta: 1,
+      },
+      0,
+      2
+    );
+
+    assert.equal(channel.count, 4, "updates the count via messagebus");
+
+    publishToMessageBus(
+      "/presence/countonly/ch1",
+      {
+        leaving_user_ids: [2],
+      },
+      0,
+      3
+    );
+
+    await channel._resubscribePromise;
+
+    assert.equal(
+      channel.count,
+      3,
+      "resubscribes when receiving a non-count-only message"
     );
   });
 });

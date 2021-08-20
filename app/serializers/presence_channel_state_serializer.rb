@@ -7,4 +7,8 @@ class PresenceChannelStateSerializer < ApplicationSerializer
   def last_message_id
     object.message_bus_last_id
   end
+
+  def include_users?
+    !users.nil?
+  end
 end

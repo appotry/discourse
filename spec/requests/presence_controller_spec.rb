@@ -13,6 +13,7 @@ describe PresenceController do
   let(:secure_group_channel) { PresenceChannel.new('/test/securegroup') }
   let(:allowed_user_channel) { PresenceChannel.new('/test/alloweduser') }
   let(:allowed_group_channel) { PresenceChannel.new('/test/allowedgroup') }
+  let(:count_only_channel) { PresenceChannel.new('/test/countonly') }
 
   before do
     PresenceChannel.clear_all!
@@ -31,6 +32,8 @@ describe PresenceController do
         PresenceChannel::Config.new(allowed_user_ids: [ user.id ])
       when "/test/allowedgroup"
         PresenceChannel::Config.new(allowed_group_ids: [ group.id ])
+      when "/test/countonly"
+        PresenceChannel::Config.new(public: true, count_only: true)
       else
         nil
       end
@@ -158,6 +161,19 @@ describe PresenceController do
 
       get "/presence/get", params: { channel: "/test/nonexistent" }
       expect(response.status).to eq(404)
+    end
+
+    it "works for count_only channels" do
+      get "/presence/get", params: { channel: count_only_channel.name }
+      expect(response.status).to eq(200)
+      expect(response.parsed_body.keys).to contain_exactly("count", "last_message_id")
+      expect(response.parsed_body["count"]).to eq(0)
+
+      count_only_channel.present(user_id: user.id, client_id: "a")
+
+      get "/presence/get", params: { channel: count_only_channel.name }
+      expect(response.status).to eq(200)
+      expect(response.parsed_body["count"]).to eq(1)
     end
 
   end

@@ -25,13 +25,10 @@ class PresenceChannel extends EmberObject {
   init({ name, presenceService }) {
     super.init(...arguments);
     this.name = name;
-    this.set("users", []);
+    this.set("users", null);
+    this.set("count", null);
+    this.set("countOnly", null);
     this.presenceService = presenceService;
-  }
-
-  @computed("users.[]")
-  get count() {
-    return this.users.length;
   }
 
   get present() {
@@ -73,7 +70,16 @@ class PresenceChannel extends EmberObject {
         }
       }
     }
-    this.set("users", initialData.users);
+
+    this.set("count", initialData.count);
+    if (initialData.users) {
+      this.set("users", initialData.users);
+      this.set("countOnly", false);
+    } else {
+      this.set("users", null);
+      this.set("countOnly", true);
+    }
+
     this.lastSeenId = initialData.last_message_id;
 
     let callback = (data, global_id, message_id) => {
@@ -91,6 +97,14 @@ class PresenceChannel extends EmberObject {
     }
   }
 
+  async _resubscribe() {
+    this.unsubscribe();
+    // Stored at object level for tests to hook in
+    this._resubscribePromise = this.subscribe();
+    await this._resubscribePromise;
+    delete this._resubscribePromise;
+  }
+
   async _processMessage(data, global_id, message_id) {
     if (message_id !== this.lastSeenId + 1) {
       // eslint-disable-next-line no-console
@@ -102,26 +116,32 @@ class PresenceChannel extends EmberObject {
         }), resyncing...`
       );
 
-      this.unsubscribe();
-
-      // Stored at object level for tests to hook in
-      this._resubscribePromise = this.subscribe();
-      await this._resubscribePromise;
-      delete this._resubscribePromise;
-
+      await this._resubscribe();
       return;
     } else {
       this.lastSeenId = message_id;
     }
 
-    if (data.entering_users) {
-      const users = data.entering_users.map((u) => User.create(u));
-      this.users.addObjects(users);
-    }
-    if (data.leaving_user_ids) {
-      const leavingIds = new Set(data.leaving_user_ids);
-      const toRemove = this.users.filter((u) => leavingIds.has(u.id));
-      this.users.removeObjects(toRemove);
+    if (this.countOnly && data.count_delta !== undefined) {
+      this.set("count", this.count + data.count_delta);
+    } else if (
+      !this.countOnly &&
+      (data.entering_users || data.leaving_user_ids)
+    ) {
+      if (data.entering_users) {
+        const users = data.entering_users.map((u) => User.create(u));
+        this.users.addObjects(users);
+      }
+      if (data.leaving_user_ids) {
+        const leavingIds = new Set(data.leaving_user_ids);
+        const toRemove = this.users.filter((u) => leavingIds.has(u.id));
+        this.users.removeObjects(toRemove);
+      }
+      this.set("count", this.users.length);
+    } else {
+      // Unexpected message
+      await this._resubscribe();
+      return;
     }
   }
 }
