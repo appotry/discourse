@@ -4,6 +4,8 @@ import { alias, and, equal } from "@ember/object/computed";
 import discourseComputed from "discourse-common/utils/decorators";
 import { VIEW_NAME_WARNINGS } from "discourse/routes/user-private-messages-warnings";
 import I18n from "I18n";
+import { iconHTML } from "discourse-common/lib/icon-library";
+import getURL from "discourse-common/lib/get-url";
 
 export const PERSONAL_INBOX = "__personal_inbox__";
 const ALL_INBOX = "__all_inbox__";
@@ -64,6 +66,19 @@ export default Controller.extend({
   @discourseComputed("viewingSelf", "pmView", "currentUser.admin")
   showWarningsWarning(viewingSelf, pmView, isAdmin) {
     return pmView === VIEW_NAME_WARNINGS && !viewingSelf && !isAdmin;
+  },
+
+  @discourseComputed
+  emptyStateBody() {
+    return I18n.t("user.no_messages_body", {
+      aboutUrl: getURL("/about"),
+      icon: iconHTML("envelope"),
+    }).htmlSafe();
+  },
+
+  @discourseComputed
+  userDoesNotHaveMessages() {
+    return false;
   },
 
   @discourseComputed("pmTopicTrackingState.newIncoming.[]", "selectedInbox")

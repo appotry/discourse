@@ -144,5 +144,14 @@
     <div class="alert alert-info">{{html-safe (i18n "admin.user.warnings_list_warning")}}</div>
   {{/if}}
 
-  {{outlet}}
+  {{#if userDoesNotHaveMessages}}
+    <div class="empty-state">
+      <span class="empty-state-title">{{i18n "user.no_messages_title"}}</span>
+      <div class="empty-state-body">
+        <p>{{emptyStateBody}}</p>
+      </div>
+    </div>
+  {{else}}
+    {{outlet}}
+  {{/if}}
 </section>
