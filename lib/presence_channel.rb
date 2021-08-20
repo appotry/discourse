@@ -101,8 +101,8 @@ class PresenceChannel
   def present(user_id:, client_id:)
     raise PresenceChannel::InvalidAccess if !can_enter?(user_id: user_id)
 
-    result = PresenceChannel.redis.eval(
-      PRESENT_LUA,
+    result = PresenceChannel.redis_eval(
+      :present,
       redis_keys,
       [name, user_id, client_id, (Time.zone.now + timeout).to_i]
     )
@@ -115,8 +115,8 @@ class PresenceChannel
   end
 
   def leave(user_id:, client_id:)
-    result = PresenceChannel.redis.eval(
-      LEAVE_LUA,
+    result = PresenceChannel.redis_eval(
+      :leave,
       redis_keys,
       [name, user_id, client_id]
     )
@@ -132,14 +132,14 @@ class PresenceChannel
     auto_leave
 
     if count_only
-      last_id, count = PresenceChannel.redis.eval(
-        COUNT_LUA,
+      last_id, count = PresenceChannel.redis_eval(
+        :count,
         redis_keys,
         [Time.zone.now.to_i]
       )
     else
-      last_id, ids = PresenceChannel.redis.eval(
-        USER_IDS_LUA,
+      last_id, ids = PresenceChannel.redis_eval(
+        :user_ids,
         redis_keys,
       )
     end
@@ -164,8 +164,8 @@ class PresenceChannel
   end
 
   def auto_leave
-    left_user_ids = PresenceChannel.redis.eval(
-      AUTO_LEAVE_LUA,
+    left_user_ids = PresenceChannel.redis_eval(
+      :auto_leave,
       redis_keys,
       [name, Time.zone.now.to_i]
     )
@@ -319,6 +319,18 @@ class PresenceChannel
     end
   end
 
+  def self.redis_eval(key, *args)
+    script_sha1 = LUA_SCRIPTS_SHA1[key]
+    raise ArgumentError.new("No script for #{key}") if script_sha1.nil?
+    redis.evalsha script_sha1, *args
+  rescue ::Redis::CommandError => e
+    if e.to_s =~ /^NOSCRIPT/
+      redis.eval LUA_SCRIPTS[key], *args
+    else
+      raise
+    end
+  end
+
   # Register a callback to configure channels with a given prefix
   # Prefix must match [a-zA-Z0-9_-]+
   # e.g. `register_prefix("topic-reply") do ... end` will be called for
@@ -367,7 +379,9 @@ class PresenceChannel
     end
   LUA
 
-  PRESENT_LUA = <<~LUA
+  LUA_SCRIPTS ||= {}
+
+  LUA_SCRIPTS[:present] = <<~LUA
     #{PARAMS_LUA}
 
     local added_count = redis.call('ZADD', zlist_key, expires, zlist_elem)
@@ -385,7 +399,7 @@ class PresenceChannel
     return added_count
   LUA
 
-  LEAVE_LUA = <<~LUA
+  LUA_SCRIPTS[:leave] = <<~LUA
     #{PARAMS_LUA}
 
     -- Remove the user from the channel zlist
@@ -404,7 +418,7 @@ class PresenceChannel
     return removed_count
   LUA
 
-  USER_IDS_LUA = <<~LUA
+  LUA_SCRIPTS[:user_ids] = <<~LUA
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local message_bus_id_key = KEYS[4]
@@ -420,7 +434,7 @@ class PresenceChannel
     return { message_bus_id, user_ids }
   LUA
 
-  COUNT_LUA = <<~LUA
+  LUA_SCRIPTS[:count] = <<~LUA
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local message_bus_id_key = KEYS[4]
@@ -437,7 +451,7 @@ class PresenceChannel
     return { message_bus_id, count }
   LUA
 
-  AUTO_LEAVE_LUA = <<~LUA
+  LUA_SCRIPTS[:auto_leave] = <<~LUA
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local channels_key = KEYS[3]
@@ -465,5 +479,9 @@ class PresenceChannel
 
     return expired_user_ids
   LUA
+  LUA_SCRIPTS.freeze
 
+  LUA_SCRIPTS_SHA1 = LUA_SCRIPTS.transform_values do |script|
+    Digest::SHA1.hexdigest(script)
+  end.freeze
 end
