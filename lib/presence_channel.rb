@@ -135,7 +135,6 @@ class PresenceChannel
       last_id, count = PresenceChannel.redis_eval(
         :count,
         redis_keys,
-        [Time.zone.now.to_i]
       )
     else
       last_id, ids = PresenceChannel.redis_eval(
@@ -438,8 +437,6 @@ class PresenceChannel
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local message_bus_id_key = KEYS[4]
-
-    local time = ARGV[1]
 
     local message_bus_id = tonumber(redis.call('GET', message_bus_id_key))
     if message_bus_id == nil then
