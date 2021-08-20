@@ -135,6 +135,7 @@ describe PresenceChannel do
     messages = MessageBus.track_publish(channel.message_bus_channel_name) do
       channel.present(user_id: user.id, client_id: "a")
       channel.present(user_id: user.id, client_id: "a")
+      channel.present(user_id: user.id, client_id: "b")
     end
 
     data = messages.map(&:data)
@@ -145,6 +146,7 @@ describe PresenceChannel do
     messages = MessageBus.track_publish(channel.message_bus_channel_name) do
       channel.leave(user_id: user.id, client_id: "a")
       channel.leave(user_id: user.id, client_id: "a")
+      channel.leave(user_id: user.id, client_id: "b")
     end
 
     data = messages.map(&:data)

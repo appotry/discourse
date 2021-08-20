@@ -383,10 +383,13 @@ class PresenceChannel
   LUA_SCRIPTS[:present] = <<~LUA
     #{PARAMS_LUA}
 
-    local added_count = redis.call('ZADD', zlist_key, expires, zlist_elem)
-    if tonumber(added_count) > 0 then
-      redis.call('HINCRBY', hash_key, tostring(user_id), 1)
-
+    local added_clients = redis.call('ZADD', zlist_key, expires, zlist_elem)
+    local added_users = 0
+    if tonumber(added_clients) > 0 then
+      local new_count = redis.call('HINCRBY', hash_key, tostring(user_id), 1)
+      if new_count == 1 then
+        added_users = 1
+      end
       -- Add the channel to the global channel list. 'LT' means the value will
       -- only be set if it's lower than the existing value
       redis.call('ZADD', channels_key, "LT", expires, tostring(channel))
@@ -395,26 +398,28 @@ class PresenceChannel
     redis.call('EXPIREAT', hash_key, expires + #{GC_SECONDS})
     redis.call('EXPIREAT', zlist_key, expires + #{GC_SECONDS})
 
-    return added_count
+    return added_users
   LUA
 
   LUA_SCRIPTS[:leave] = <<~LUA
     #{PARAMS_LUA}
 
     -- Remove the user from the channel zlist
-    local removed_count = redis.call('ZREM', zlist_key, zlist_elem)
+    local removed_clients = redis.call('ZREM', zlist_key, zlist_elem)
 
-    if tonumber(removed_count) > 0 then
+    local removed_users = 0
+    if tonumber(removed_clients) > 0 then
       #{UPDATE_GLOBAL_CHANNELS_LUA}
 
       -- Update the user session count in the channel hash
       local val = redis.call('HINCRBY', hash_key, user_id, -1)
       if val <= 0 then
         redis.call('HDEL', hash_key, user_id)
+        removed_users = 1
       end
     end
 
-    return removed_count
+    return removed_users
   LUA
 
   LUA_SCRIPTS[:user_ids] = <<~LUA
