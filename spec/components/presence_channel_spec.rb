@@ -253,4 +253,22 @@ describe PresenceChannel do
       "count_delta" => -1
     })
   end
+
+  it "sets a mutex when the change involves publishing messages" do
+    mutex_set_during_update = false
+    channel = PresenceChannel.new("/test/public1")
+
+    def channel.publish_message(*args, **kwargs)
+      val = PresenceChannel.redis.get(redis_key_mutex)
+      raise "Mutex was not set" if val.nil?
+    end
+
+    redis_key_mutex = Discourse.redis.namespace_key("_presence_/test/public1_mutex")
+
+    expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
+    channel.present(user_id: user.id, client_id: 'a')
+    expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
+    channel.leave(user_id: user.id, client_id: 'a')
+    expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
+  end
 end

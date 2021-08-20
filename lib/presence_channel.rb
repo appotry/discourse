@@ -61,6 +61,8 @@ class PresenceChannel
   DEFAULT_TIMEOUT ||= 60
   CONFIG_CACHE_SECONDS ||= 120
   GC_SECONDS ||= 24.hours.to_i
+  MUTEX_TIMEOUT_SECONDS ||= 10
+  MUTEX_LOCKED_ERROR ||= "PresenceChannel mutex is locked"
 
   @@configuration_blocks ||= {}
 
@@ -101,28 +103,42 @@ class PresenceChannel
   def present(user_id:, client_id:)
     raise PresenceChannel::InvalidAccess if !can_enter?(user_id: user_id)
 
-    result = PresenceChannel.redis_eval(
-      :present,
-      redis_keys,
-      [name, user_id, client_id, (Time.zone.now + timeout).to_i]
-    )
+    mutex_value = SecureRandom.hex
+    result = retry_on_mutex_error do
+      PresenceChannel.redis_eval(
+        :present,
+        redis_keys,
+        [name, user_id, client_id, (Time.zone.now + timeout).to_i, mutex_value]
+      )
+    end
 
     if result == 1
-      publish_message(entering_user_ids: [user_id])
+      begin
+        publish_message(entering_user_ids: [user_id])
+      ensure
+        release_mutex(mutex_value)
+      end
     end
 
     auto_leave
   end
 
   def leave(user_id:, client_id:)
-    result = PresenceChannel.redis_eval(
-      :leave,
-      redis_keys,
-      [name, user_id, client_id]
-    )
+    mutex_value = SecureRandom.hex
+    result = retry_on_mutex_error do
+      PresenceChannel.redis_eval(
+        :leave,
+        redis_keys,
+        [name, user_id, client_id, nil, mutex_value]
+      )
+    end
 
     if result == 1
-      publish_message(leaving_user_ids: [user_id])
+      begin
+        publish_message(leaving_user_ids: [user_id])
+      ensure
+        release_mutex(mutex_value)
+      end
     end
 
     auto_leave
@@ -132,15 +148,19 @@ class PresenceChannel
     auto_leave
 
     if count_only
-      last_id, count = PresenceChannel.redis_eval(
-        :count,
-        redis_keys,
-      )
+      last_id, count = retry_on_mutex_error do
+        PresenceChannel.redis_eval(
+          :count,
+          redis_keys,
+        )
+      end
     else
-      last_id, ids = PresenceChannel.redis_eval(
-        :user_ids,
-        redis_keys,
-      )
+      last_id, ids = retry_on_mutex_error do
+        PresenceChannel.redis_eval(
+          :user_ids,
+          redis_keys,
+        )
+      end
     end
     count ||= ids&.count
     last_id = nil if last_id == -1
@@ -163,14 +183,21 @@ class PresenceChannel
   end
 
   def auto_leave
-    left_user_ids = PresenceChannel.redis_eval(
-      :auto_leave,
-      redis_keys,
-      [name, Time.zone.now.to_i]
-    )
+    mutex_value = SecureRandom.hex
+    left_user_ids = retry_on_mutex_error do
+      PresenceChannel.redis_eval(
+        :auto_leave,
+        redis_keys,
+        [name, Time.zone.now.to_i, mutex_value]
+      )
+    end
 
     if !left_user_ids.empty?
-      publish_message(leaving_user_ids: left_user_ids)
+      begin
+        publish_message(leaving_user_ids: left_user_ids)
+      ensure
+        release_mutex(mutex_value)
+      end
     end
   end
 
@@ -179,6 +206,7 @@ class PresenceChannel
     PresenceChannel.redis.del(redis_key_zlist)
     PresenceChannel.redis.del(redis_key_hash)
     PresenceChannel.redis.del(redis_key_config)
+    PresenceChannel.redis.del(redis_key_mutex)
     PresenceChannel.redis.zrem(self.class.redis_key_channel_list, name)
   end
 
@@ -244,6 +272,44 @@ class PresenceChannel
     MessageBus.publish(message_bus_channel_name, message.as_json, **params)
   end
 
+  # Most atomic actions are achieved via lua scripts. However, when a lua action
+  # will result in publishing a messagebus message, the atomicity is broken.
+  #
+  # For example, if one process is handling a 'user enter' event, and another is
+  # handling a 'user leave' event, we need to make sure the messagebus messages
+  # are published in the same sequence that the PresenceChannel lua script are run.
+  #
+  # The present/leave/auto_leave lua scripts will automatically acquire this mutex
+  # if needed. If their return value indicates a change has occured, the mutex
+  # should be released via #release_mutex after the messagebus message has been sent
+  #
+  # If they need a change, and the mutex is not available, they will raise an error
+  # and should be retried periodically
+  def redis_key_mutex
+    Discourse.redis.namespace_key("_presence_#{name}_mutex")
+  end
+
+  def release_mutex(mutex_value)
+    PresenceChannel.redis_eval(
+      :release_mutex,
+      [redis_key_mutex],
+      [mutex_value]
+    )
+  end
+
+  def retry_on_mutex_error
+    attempts ||= 0
+    yield
+  rescue ::Redis::CommandError => e
+    if e.to_s =~ /#{MUTEX_LOCKED_ERROR}/ && attempts < 1000
+      attempts += 1
+      sleep 0.001
+      retry
+    else
+      raise
+    end
+  end
+
   # The redis key which MessageBus uses to store the 'last_id' for the channel
   # associated with this PresenceChannel.
   def message_bus_last_id_key
@@ -255,7 +321,7 @@ class PresenceChannel
   end
 
   def redis_keys
-    [redis_key_zlist, redis_key_hash, self.class.redis_key_channel_list, message_bus_last_id_key]
+    [redis_key_zlist, redis_key_hash, self.class.redis_key_channel_list, message_bus_last_id_key, redis_key_mutex]
   end
 
   # The zlist is a list of client_ids, ranked by their expiration timestamp
@@ -353,15 +419,20 @@ class PresenceChannel
     @@configuration_blocks&.delete(prefix)
   end
 
-  PARAMS_LUA = <<~LUA
+  COMMON_PRESENT_LEAVE_LUA = <<~LUA
     local channel = ARGV[1]
     local user_id = ARGV[2]
     local client_id = ARGV[3]
     local expires = ARGV[4]
+    local mutex_value = ARGV[5]
 
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local channels_key = KEYS[3]
+    local message_bus_id_key = KEYS[4]
+    local mutex_key = KEYS[5]
+
+    local mutex_locked = redis.call('EXISTS', mutex_key) == 1
 
     local zlist_elem = tostring(user_id) .. " " .. tostring(client_id)
   LUA
@@ -381,7 +452,14 @@ class PresenceChannel
   LUA_SCRIPTS ||= {}
 
   LUA_SCRIPTS[:present] = <<~LUA
-    #{PARAMS_LUA}
+    #{COMMON_PRESENT_LEAVE_LUA}
+
+    if mutex_locked then
+      local mutex_required = redis.call('HGET', hash_key, tostring(user_id)) == false
+      if mutex_required then
+        error("#{MUTEX_LOCKED_ERROR}")
+      end
+    end
 
     local added_clients = redis.call('ZADD', zlist_key, expires, zlist_elem)
     local added_users = 0
@@ -389,6 +467,7 @@ class PresenceChannel
       local new_count = redis.call('HINCRBY', hash_key, tostring(user_id), 1)
       if new_count == 1 then
         added_users = 1
+        redis.call('SET', mutex_key, mutex_value, 'EX', #{MUTEX_TIMEOUT_SECONDS})
       end
       -- Add the channel to the global channel list. 'LT' means the value will
       -- only be set if it's lower than the existing value
@@ -402,7 +481,15 @@ class PresenceChannel
   LUA
 
   LUA_SCRIPTS[:leave] = <<~LUA
-    #{PARAMS_LUA}
+    #{COMMON_PRESENT_LEAVE_LUA}
+
+    if mutex_locked then
+      local user_session_count = redis.call('HGET', hash_key, tostring(user_id))
+      local mutex_required = user_session_count == 1 and redis.call('ZRANK', zlist_key, zlist_elem) ~= false
+      if mutex_required then
+        error("#{MUTEX_LOCKED_ERROR}")
+      end
+    end
 
     -- Remove the user from the channel zlist
     local removed_clients = redis.call('ZREM', zlist_key, zlist_elem)
@@ -416,16 +503,31 @@ class PresenceChannel
       if val <= 0 then
         redis.call('HDEL', hash_key, user_id)
         removed_users = 1
+        redis.call('SET', mutex_key, mutex_value, 'EX', #{MUTEX_TIMEOUT_SECONDS})
       end
     end
 
     return removed_users
   LUA
 
+  LUA_SCRIPTS[:release_mutex] = <<~LUA
+    local mutex_key = KEYS[1]
+    local expected_value = ARGV[1]
+
+    if redis.call("GET", mutex_key) == expected_value then
+      redis.call("DEL", mutex_key)
+    end
+  LUA
+
   LUA_SCRIPTS[:user_ids] = <<~LUA
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local message_bus_id_key = KEYS[4]
+    local mutex_key = KEYS[5]
+
+    if redis.call('EXISTS', mutex_key) > 0 then
+      error('#{MUTEX_LOCKED_ERROR}')
+    end
 
     local user_ids = redis.call('HKEYS', hash_key)
     table.foreach(user_ids, function(k,v) user_ids[k] = tonumber(v) end)
@@ -442,6 +544,11 @@ class PresenceChannel
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local message_bus_id_key = KEYS[4]
+    local mutex_key = KEYS[5]
+
+    if redis.call('EXISTS', mutex_key) > 0 then
+      error('#{MUTEX_LOCKED_ERROR}')
+    end
 
     local message_bus_id = tonumber(redis.call('GET', message_bus_id_key))
     if message_bus_id == nil then
@@ -457,25 +564,48 @@ class PresenceChannel
     local zlist_key = KEYS[1]
     local hash_key = KEYS[2]
     local channels_key = KEYS[3]
+    local mutex_key = KEYS[5]
     local channel = ARGV[1]
     local time = ARGV[2]
+    local mutex_value = ARGV[3]
 
     local expire = redis.call('ZRANGE', zlist_key, '-inf', time, 'BYSCORE')
+
+    local has_mutex = false
+
+    local get_mutex = function()
+      if redis.call('SETNX', mutex_key, mutex_value) == 0 then
+        error("#{MUTEX_LOCKED_ERROR}")
+      end
+      redis.call('EXPIRE', mutex_key, #{MUTEX_TIMEOUT_SECONDS})
+      has_mutex = true
+    end
+
+    if table.getn(expire) > 0 then
+      if redis.call('SETNX', mutex_key, mutex_value) == 0 then
+        error("#{MUTEX_LOCKED_ERROR}")
+      end
+      redis.call('EXPIRE', mutex_key, #{MUTEX_TIMEOUT_SECONDS})
+    end
 
     local expired_user_ids = {}
 
     local expireOld = function(k, v)
       local user_id = v:match("[^ ]+")
+
+      if (not has_mutex) and (redis.call('HGET', hash_key, user_id) == 1) then
+        get_mutex()
+      end
+
       local val = redis.call('HINCRBY', hash_key, user_id, -1)
       if val <= 0 then
         table.insert(expired_user_ids, tonumber(user_id))
         redis.call('HDEL', hash_key, user_id)
       end
+      redis.call('ZREM', zlist_key, v)
     end
 
     table.foreach(expire, expireOld)
-
-    redis.call('ZREMRANGEBYSCORE', zlist_key, "-inf", time)
 
     #{UPDATE_GLOBAL_CHANNELS_LUA}
 
