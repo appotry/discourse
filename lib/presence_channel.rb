@@ -34,7 +34,7 @@ class PresenceChannel
   #   count_only: boolean. If true, user identities are never revealed to clients. (default [])
   class Config
     NOT_FOUND ||= "notfound"
-    attr_reader :public, :allowed_user_ids, :allowed_group_ids, :count_only
+    attr_accessor :public, :allowed_user_ids, :allowed_group_ids, :count_only
 
     def initialize(public: false, allowed_user_ids: nil, allowed_group_ids: nil, count_only: false)
       @public = public
