@@ -26,6 +26,9 @@ class PresenceController < ApplicationController
     client_id = params[:client_id]
     raise Discourse::InvalidParameters.new(:client_id) if !client_id.is_a?(String) || client_id.blank?
 
+    # JS client is designed to throttle to one request every 5 seconds
+    RateLimiter.new(nil, "update-presence-#{current_user.id}-#{client_id}}", 3, 10.seconds).performed!
+
     present_channels = params[:present_channels]
     if present_channels && !(present_channels.is_a?(Array) && present_channels.all? { |c| c.is_a? String })
       raise Discourse::InvalidParameters.new(:present_channels)
@@ -34,6 +37,10 @@ class PresenceController < ApplicationController
     leave_channels = params[:leave_channels]
     if leave_channels && !(leave_channels.is_a?(Array) && leave_channels.all? { |c| c.is_a? String })
       raise Discourse::InvalidParameters.new(:leave_channels)
+    end
+
+    if present_channels && present_channels.length > 50
+      raise Discourse::InvalidParameters.new("Too many present_channels")
     end
 
     response = {}

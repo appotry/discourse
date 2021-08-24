@@ -1,14 +1,15 @@
 import Service from "@ember/service";
 import EmberObject, { computed } from "@ember/object";
 import { ajax } from "discourse/lib/ajax";
-import { cancel, later, throttle } from "@ember/runloop";
+import { cancel, debounce, later, throttle } from "@ember/runloop";
 import Session from "discourse/models/session";
 import { Promise } from "rsvp";
 import { isTesting } from "discourse-common/config/environment";
 import User from "discourse/models/user";
 
 const PRESENCE_INTERVAL_S = 30;
-const PRESENCE_THROTTLE_MS = 100;
+const PRESENCE_DEBOUNCE_MS = 500;
+const PRESENCE_THROTTLE_MS = 5000;
 
 function createPromiseProxy() {
   const promiseProxy = {};
@@ -181,7 +182,7 @@ export default class PresenceService extends Service {
       promiseProxy: promiseProxy,
     });
 
-    this._requestFastUpdate();
+    this._scheduleNextUpdate();
 
     await promiseProxy.promise;
   }
@@ -204,7 +205,7 @@ export default class PresenceService extends Service {
       promiseProxy: promiseProxy,
     });
 
-    this._requestFastUpdate();
+    this._scheduleNextUpdate();
 
     await promiseProxy.promise;
   }
@@ -247,13 +248,10 @@ export default class PresenceService extends Service {
   }
 
   async _updateServer() {
+    this._lastUpdate = new Date();
     this._updateRunning = true;
-    this._fastUpdateRequired = false;
 
-    if (this._nextUpdateTimer) {
-      cancel(this._nextUpdateTimer);
-      this._nextUpdateTimer = null;
-    }
+    this._cancelTimer();
 
     this._dedupQueue();
     const queue = this._queuedEvents;
@@ -284,30 +282,49 @@ export default class PresenceService extends Service {
           e.promiseProxy.resolve();
         }
       });
-    } catch {
+    } catch (e) {
       // Updating server failed. Put the failed events
       // back in the queue for next time
       this._queuedEvents.unshift(...queue);
+      if (e.jqXHR?.status === 429) {
+        // Rate limited. No need to raise, we'll try again later
+      } else {
+        throw e;
+      }
     } finally {
       this._updateRunning = false;
       this._scheduleNextUpdate();
     }
   }
 
+  // `throttle` only allows triggering on the first **or** the last event
+  // in a sequence of calls. We want both. We want the first event, to make
+  // things very responsive. Then if things are happening too frequently, we
+  // drop back to the last event via the regular throttle function.
   _throttledUpdateServer() {
-    throttle(this, this._updateServer, PRESENCE_THROTTLE_MS, false);
+    if (
+      !this._lastUpdate ||
+      new Date() - this._lastUpdate > PRESENCE_THROTTLE_MS
+    ) {
+      this._updateServer();
+    } else {
+      throttle(this, this._updateServer, PRESENCE_THROTTLE_MS, false);
+    }
   }
 
-  _requestFastUpdate() {
-    this._fastUpdateRequired = true;
-    this._scheduleNextUpdate();
+  _cancelTimer() {
+    if (this._nextUpdateTimer) {
+      cancel(this._nextUpdateTimer);
+      this._nextUpdateTimer = null;
+    }
   }
 
   _scheduleNextUpdate() {
     if (this._updateRunning) {
       return;
-    } else if (this._fastUpdateRequired) {
-      this._throttledUpdateServer();
+    } else if (this._queuedEvents.length > 0) {
+      this._cancelTimer();
+      debounce(this, this._throttledUpdateServer, PRESENCE_DEBOUNCE_MS);
     } else if (!this._nextUpdateTimer && !isTesting()) {
       this._nextUpdateTimer = later(
         this,
