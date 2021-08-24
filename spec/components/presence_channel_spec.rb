@@ -255,32 +255,20 @@ describe PresenceChannel do
   end
 
   it "sets a mutex when the change involves publishing messages" do
+    mutex_set_during_update = false
     channel = PresenceChannel.new("/test/public1")
 
-    messages_published = 0
-    channel.define_singleton_method(:publish_message) do |*args, **kwargs|
+    def channel.publish_message(*args, **kwargs)
       val = PresenceChannel.redis.get(redis_key_mutex)
       raise "Mutex was not set" if val.nil?
-      messages_published += 1
     end
 
     redis_key_mutex = Discourse.redis.namespace_key("_presence_/test/public1_mutex")
 
-    # Enter and leave
     expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
     channel.present(user_id: user.id, client_id: 'a')
     expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
     channel.leave(user_id: user.id, client_id: 'a')
     expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
-    expect(messages_published).to eq(2)
-
-    # Enter and auto_leave
-    channel.present(user_id: user.id, client_id: 'a')
-    expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
-    freeze_time 1.hour.from_now
-    channel.auto_leave
-    expect(PresenceChannel.redis.get(redis_key_mutex)).to eq(nil)
-
-    expect(messages_published).to eq(4)
   end
 end
