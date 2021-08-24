@@ -581,19 +581,12 @@ class PresenceChannel
       has_mutex = true
     end
 
-    if table.getn(expire) > 0 then
-      if redis.call('SETNX', mutex_key, mutex_value) == 0 then
-        error("#{MUTEX_LOCKED_ERROR}")
-      end
-      redis.call('EXPIRE', mutex_key, #{MUTEX_TIMEOUT_SECONDS})
-    end
-
     local expired_user_ids = {}
 
     local expireOld = function(k, v)
       local user_id = v:match("[^ ]+")
 
-      if (not has_mutex) and (redis.call('HGET', hash_key, user_id) == 1) then
+      if (not has_mutex) and (tonumber(redis.call('HGET', hash_key, user_id)) == 1) then
         get_mutex()
       end
 
