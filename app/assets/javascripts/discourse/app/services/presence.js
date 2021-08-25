@@ -32,23 +32,33 @@ class PresenceChannel extends EmberObject {
     this.presenceService = presenceService;
   }
 
+  // Is the current user currently present in this channel?
   get present() {
     return this.presenceService._presentChannels.has(this.name);
   }
 
+  // Is this PresenceChannel object currently subscribed to updates
+  // from the server.
   @computed("_subscribedCallback")
   get subscribed() {
     return !!this._subscribedCallback;
   }
 
+  // Mark the current user as 'present' in this channel
   async enter() {
-    await this.presenceService.enter(this.name);
+    await this.presenceService._enter(this.name);
   }
 
+  // Mark the current user as leaving this channel
   async leave() {
-    await this.presenceService.leave(this.name);
+    await this.presenceService._leave(this.name);
   }
 
+  // Subscribe to server-side updates about the channel
+  // Ideally, pass an initialData object with serialized PresenceChannel::State
+  // data from the server (serialized via PresenceChannelStateSerializer).
+  //
+  // If initialData is not supplied, an AJAX request will be made for the information.
   async subscribe(initialData = null) {
     if (this.subscribed) {
       return;
@@ -86,15 +96,18 @@ class PresenceChannel extends EmberObject {
     let callback = (data, global_id, message_id) => {
       this._processMessage(data, global_id, message_id);
     };
-    this.presenceService.subscribe(this.name, callback, this.lastSeenId);
+    this.presenceService._subscribe(this.name, callback, this.lastSeenId);
 
     this.set("_subscribedCallback", callback);
   }
 
+  // Stop subscribing to updates from the server about this channel
   unsubscribe() {
     if (this.subscribed) {
-      this.presenceService.unsubscribe(this.name, this._subscribedCallback);
+      this.presenceService._unsubscribe(this.name, this._subscribedCallback);
       this.set("_subscribedCallback", null);
+      this.set("users", null);
+      this.set("count", null);
     }
   }
 
@@ -157,6 +170,7 @@ export default class PresenceService extends Service {
     });
   }
 
+  // Get a PresenceChannel object representing a single channel
   getChannel(channelName) {
     return PresenceChannel.create({
       name: channelName,
@@ -164,7 +178,7 @@ export default class PresenceService extends Service {
     });
   }
 
-  async enter(channelName) {
+  async _enter(channelName) {
     if (!this.currentUser) {
       throw "Must be logged in to enter presence channel";
     }
@@ -187,7 +201,7 @@ export default class PresenceService extends Service {
     await promiseProxy.promise;
   }
 
-  async leave(channelName) {
+  async _leave(channelName) {
     if (!this.currentUser) {
       throw "Must be logged in to leave presence channel";
     }
@@ -210,11 +224,11 @@ export default class PresenceService extends Service {
     await promiseProxy.promise;
   }
 
-  subscribe(channelName, callback, lastSeenId) {
+  _subscribe(channelName, callback, lastSeenId) {
     this.messageBus.subscribe(`/presence${channelName}`, callback, lastSeenId);
   }
 
-  unsubscribe(channelName, callback) {
+  _unsubscribe(channelName, callback) {
     this.messageBus.unsubscribe(`/presence${channelName}`, callback);
   }
 

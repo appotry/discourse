@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# The server-side implementation of PresenceChannels. See also {PresenceController}
+# and +app/assets/javascripts/discourse/app/services/presence.js+
 class PresenceChannel
   class NotFound < StandardError; end
   class InvalidAccess < StandardError; end
@@ -100,6 +102,9 @@ class PresenceChannel
     can_view?(user_id: user_id)
   end
 
+  # Mark a user's client as present in this channel. The client_id should be unique per
+  # browser tab. This method should be called repeatedly (at least once every DEFAULT_TIMEOUT)
+  # while the user is present in the channel.
   def present(user_id:, client_id:)
     raise PresenceChannel::InvalidAccess if !can_enter?(user_id: user_id)
 
@@ -123,6 +128,7 @@ class PresenceChannel
     auto_leave
   end
 
+  # Immediately mark a user's client as leaving the channel
   def leave(user_id:, client_id:)
     mutex_value = SecureRandom.hex
     result = retry_on_mutex_error do
@@ -144,6 +150,9 @@ class PresenceChannel
     auto_leave
   end
 
+  # Fetch a {PresenceChannel::State} instance representing the current state of this
+  #
+  # @param [Boolean] count_only set true to skip fetching the list of user ids from redis
   def state(count_only: config.count_only)
     auto_leave
 
@@ -182,6 +191,7 @@ class PresenceChannel
     state(count_only: true).count
   end
 
+  # Automatically expire all users which have not been 'present' for more than +DEFAULT_TIMEOUT+
   def auto_leave
     mutex_value = SecureRandom.hex
     left_user_ids = retry_on_mutex_error do
@@ -208,6 +218,81 @@ class PresenceChannel
     PresenceChannel.redis.del(redis_key_config)
     PresenceChannel.redis.del(redis_key_mutex)
     PresenceChannel.redis.zrem(self.class.redis_key_channel_list, name)
+  end
+
+  # Designed to be run periodically. Checks the channel list for channels with expired members,
+  # and runs auto_leave for each eligable channel
+  def self.auto_leave_all
+    channels_with_expiring_members = PresenceChannel.redis.zrangebyscore(redis_key_channel_list, '-inf', Time.zone.now.to_i)
+    channels_with_expiring_members.each do |name|
+      new(name, raise_not_found: false).auto_leave
+    end
+  end
+
+  # Clear all known channels. This is intended for debugging/development only
+  def self.clear_all!
+    channels = PresenceChannel.redis.zrangebyscore(redis_key_channel_list, '-inf', '+inf')
+    channels.each do |name|
+      new(name, raise_not_found: false).clear
+    end
+
+    config_cache_keys = PresenceChannel.redis.scan_each(match: Discourse.redis.namespace_key("_presence_*_config")).to_a
+    PresenceChannel.redis.del(*config_cache_keys) if config_cache_keys.present?
+  end
+
+  # Shortcut to access a redis client for all PresenceChannel activities.
+  # PresenceChannel must use the same Redis server as MessageBus, so that
+  # actions can be applied atomically. For the vast majority of Discourse
+  # installations, this is the same Redis server as `Discourse.redis`.
+  def self.redis
+    if MessageBus.backend == :redis
+      MessageBus.reliable_pub_sub.send(:pub_redis) # TODO: avoid a private API?
+    elsif Rails.env.test?
+      Discourse.redis.without_namespace
+    else
+      raise "PresenceChannel is unable to access MessageBus's Redis instance"
+    end
+  end
+
+  def self.redis_eval(key, *args)
+    script_sha1 = LUA_SCRIPTS_SHA1[key]
+    raise ArgumentError.new("No script for #{key}") if script_sha1.nil?
+    redis.evalsha script_sha1, *args
+  rescue ::Redis::CommandError => e
+    if e.to_s =~ /^NOSCRIPT/
+      redis.eval LUA_SCRIPTS[key], *args
+    else
+      raise
+    end
+  end
+
+  # Register a callback to configure channels with a given prefix
+  # Prefix must match [a-zA-Z0-9_-]+
+  #
+  # For example, this registration will be used for
+  # all channels starting /topic-reply/...:
+  #
+  #     register_prefix("topic-reply") do |channel_name|
+  #       PresenceChannel::Config.new(public: true)
+  #     end
+  #
+  # At runtime, the block will be passed a full channel name. If the channel
+  # should not exist, the block should return `nil`. If the channel should exist,
+  # the block should return a PresenceChannel::Config object.
+  #
+  # Return values may be cached for up to 2 minutes.
+  #
+  # Plugins should use the {Plugin::Instance.register_presence_channel_prefix} API instead
+  def self.register_prefix(prefix, &block)
+    raise "PresenceChannel prefix #{prefix} must match [a-zA-Z0-9_-]+" unless prefix.match? /[a-zA-Z0-9_-]+/
+    raise "PresenceChannel prefix #{prefix} already registered" if @@configuration_blocks&.[](prefix)
+    @@configuration_blocks[prefix] = block
+  end
+
+  # For use in a test environment only
+  def self.unregister_prefix(prefix)
+    raise "Only allowed in test environment" if !Rails.env.test?
+    @@configuration_blocks&.delete(prefix)
   end
 
   private
@@ -244,7 +329,6 @@ class PresenceChannel
 
   def publish_message(entering_user_ids: nil, leaving_user_ids: nil)
     message = {}
-
     if config.count_only
       message["count_delta"] = entering_user_ids&.count || 0
       message["count_delta"] -= leaving_user_ids&.count || 0
@@ -348,75 +432,6 @@ class PresenceChannel
   # We periodically check the 'lowest ranked' items in this list based on the `timeout` of the channel
   def self.redis_key_channel_list
     Discourse.redis.namespace_key("_presence_channels")
-  end
-
-  # Designed to be run periodically. Checks the channel list for channels with expired members,
-  # and runs auto_leave for each eligable channel
-  def self.auto_leave_all
-    channels_with_expiring_members = PresenceChannel.redis.zrangebyscore(redis_key_channel_list, '-inf', Time.zone.now.to_i)
-    channels_with_expiring_members.each do |name|
-      new(name, raise_not_found: false).auto_leave
-    end
-  end
-
-  # Clear all known channels. This is intended for debugging/development only
-  def self.clear_all!
-    channels = PresenceChannel.redis.zrangebyscore(redis_key_channel_list, '-inf', '+inf')
-    channels.each do |name|
-      new(name, raise_not_found: false).clear
-    end
-
-    config_cache_keys = PresenceChannel.redis.scan_each(match: Discourse.redis.namespace_key("_presence_*_config")).to_a
-    PresenceChannel.redis.del(*config_cache_keys) if config_cache_keys.present?
-  end
-
-  # Shortcut to access a redis client for all PresenceChannel activities.
-  # PresenceChannel must use the same Redis server as MessageBus, so that
-  # actions can be applied atomically. For the vast majority of Discourse
-  # installations, this is the same Redis server as `Discourse.redis`.
-  def self.redis
-    if MessageBus.backend == :redis
-      MessageBus.reliable_pub_sub.send(:pub_redis) # TODO: avoid a private API?
-    elsif Rails.env.test?
-      Discourse.redis.without_namespace
-    else
-      raise "PresenceChannel is unable to access MessageBus's Redis instance"
-    end
-  end
-
-  def self.redis_eval(key, *args)
-    script_sha1 = LUA_SCRIPTS_SHA1[key]
-    raise ArgumentError.new("No script for #{key}") if script_sha1.nil?
-    redis.evalsha script_sha1, *args
-  rescue ::Redis::CommandError => e
-    if e.to_s =~ /^NOSCRIPT/
-      redis.eval LUA_SCRIPTS[key], *args
-    else
-      raise
-    end
-  end
-
-  # Register a callback to configure channels with a given prefix
-  # Prefix must match [a-zA-Z0-9_-]+
-  # e.g. `register_prefix("topic-reply") do ... end` will be called for
-  #      all channels starting `/topic-reply/...`
-  #
-  # At runtime, the block will be passed a full channel name. If the channel
-  # should not exist, the block should return `nil`. If the channel should exist,
-  # the block should return a PresenceChannel::Config object
-  #
-  # Return values may be cached for up to 2 minutes
-  #
-  # Plugins should use the Plugin::Instance API instead
-  def self.register_prefix(prefix, &block)
-    raise "PresenceChannel prefix #{prefix} must match [a-zA-Z0-9_-]+" unless prefix.match? /[a-zA-Z0-9_-]+/
-    raise "PresenceChannel prefix #{prefix} already registered" if @@configuration_blocks&.[](prefix)
-    @@configuration_blocks[prefix] = block
-  end
-
-  def self.unregister_prefix(prefix)
-    raise "Only allowed in test environment" if !Rails.env.test?
-    @@configuration_blocks&.delete(prefix)
   end
 
   COMMON_PRESENT_LEAVE_LUA = <<~LUA
