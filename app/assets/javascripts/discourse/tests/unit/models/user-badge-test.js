@@ -1,25 +1,30 @@
+import { getOwner } from "@ember/owner";
+import { setupTest } from "ember-qunit";
 import { module, test } from "qunit";
+import { cloneJSON } from "discourse/lib/object";
 import UserBadge from "discourse/models/user-badge";
 import badgeFixtures from "discourse/tests/fixtures/user-badges";
 
-module("Unit | Model | user-badge", function () {
+module("Unit | Model | user-badge", function (hooks) {
+  setupTest(hooks);
+
   test("createFromJson single", function (assert) {
     const userBadge = UserBadge.createFromJson(
-      JSON.parse(JSON.stringify(badgeFixtures["/user_badges"]))
+      cloneJSON(badgeFixtures["/user_badges"])
     );
-    assert.ok(!Array.isArray(userBadge), "does not return an array");
+    assert.false(Array.isArray(userBadge), "does not return an array");
     assert.strictEqual(
-      userBadge.get("badge.name"),
+      userBadge.badge.name,
       "Badge 2",
       "badge reference is set"
     );
     assert.strictEqual(
-      userBadge.get("badge.badge_type.name"),
+      userBadge.badge.badge_type.name,
       "Silver 2",
       "badge.badge_type reference is set"
     );
     assert.strictEqual(
-      userBadge.get("granted_by.username"),
+      userBadge.granted_by.username,
       "anne3",
       "granted_by reference is set"
     );
@@ -27,11 +32,11 @@ module("Unit | Model | user-badge", function () {
 
   test("createFromJson array", function (assert) {
     const userBadges = UserBadge.createFromJson(
-      JSON.parse(JSON.stringify(badgeFixtures["/user-badges/:username"]))
+      cloneJSON(badgeFixtures["/user-badges/:username"])
     );
-    assert.ok(Array.isArray(userBadges), "returns an array");
+    assert.true(Array.isArray(userBadges), "returns an array");
     assert.strictEqual(
-      userBadges[0].get("granted_by"),
+      userBadges[0].granted_by,
       undefined,
       "granted_by reference is not set when null"
     );
@@ -39,30 +44,32 @@ module("Unit | Model | user-badge", function () {
 
   test("findByUsername", async function (assert) {
     const badges = await UserBadge.findByUsername("anne3");
-    assert.ok(Array.isArray(badges), "returns an array");
+    assert.true(Array.isArray(badges), "returns an array");
   });
 
   test("findByBadgeId", async function (assert) {
     const badges = await UserBadge.findByBadgeId(880);
-    assert.ok(Array.isArray(badges), "returns an array");
+    assert.true(Array.isArray(badges), "returns an array");
   });
 
   test("grant", async function (assert) {
     const userBadge = await UserBadge.grant(1, "username");
-    assert.ok(!Array.isArray(userBadge), "does not return an array");
+    assert.false(Array.isArray(userBadge), "does not return an array");
   });
 
   test("revoke", async function (assert) {
-    assert.expect(0);
-    const userBadge = UserBadge.create({ id: 1 });
-    await userBadge.revoke();
+    const store = getOwner(this).lookup("service:store");
+    const userBadge = store.createRecord("user-badge", { id: 1 });
+    const result = await userBadge.revoke();
+    assert.deepEqual(result, { success: true });
   });
 
   test("favorite", async function (assert) {
-    const userBadge = UserBadge.create({ id: 1 });
-    assert.notOk(userBadge.is_favorite);
+    const store = getOwner(this).lookup("service:store");
+    const userBadge = store.createRecord("user-badge", { id: 1 });
+    assert.strictEqual(userBadge.is_favorite, undefined);
 
     await userBadge.favorite();
-    assert.ok(userBadge.is_favorite);
+    assert.true(userBadge.is_favorite);
   });
 });

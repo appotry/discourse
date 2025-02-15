@@ -1,13 +1,13 @@
 $mobile-breakpoint: 700px;
 
 .bookmark-list {
-  th.post-metadata {
+  .topic-list-data.post-metadata {
     text-align: center;
   }
 }
 
 .bookmark-list-item {
-  td.post-metadata {
+  .topic-list-data.post-metadata {
     text-align: center;
   }
   @media (max-width: $mobile-breakpoint) {
@@ -15,28 +15,36 @@ $mobile-breakpoint: 700px;
       padding-right: 0.5em;
     }
   }
-  .main-link {
+
+  .main-link.topic-list-data {
     .bookmark-status-with-link {
       a.title {
         padding: 0;
       }
     }
   }
+
   .d-icon.bookmark-pinned {
-    font-size: $font-down-2;
+    font-size: var(--font-down-2);
     margin-right: 0.2em;
   }
+
   .bookmark-metadata {
-    font-size: $font-down-2;
+    font-size: var(--font-down-2);
     margin-bottom: 0.25em;
 
     &-item {
       display: inline-block;
       margin-right: 1em;
       margin-bottom: 0.25em;
-      line-height: $line-height-medium;
+      line-height: var(--line-height-medium);
+
       span {
         word-break: break-word;
+      }
+
+      &.bookmark-expired-reminder {
+        color: var(--danger);
       }
     }
 
@@ -44,6 +52,7 @@ $mobile-breakpoint: 700px;
       margin-right: 0.25em;
     }
   }
+
   .bookmark-status-with-link {
     display: flex;
     flex-direction: row;
@@ -52,6 +61,7 @@ $mobile-breakpoint: 700px;
     .mobile-view & {
       margin-bottom: 0.15em;
     }
+
     .topic-statuses {
       float: none;
     }
@@ -67,5 +77,11 @@ $mobile-breakpoint: 700px;
       float: left;
       margin: 0.27em 0.27em 0 0;
     }
+  }
+}
+
+.select-kit.bookmark-actions-dropdown {
+  .select-kit-body {
+    max-width: 350px;
   }
 }

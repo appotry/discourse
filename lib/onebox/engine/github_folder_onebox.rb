@@ -7,8 +7,12 @@ module Onebox
       include StandardEmbed
       include LayoutSupport
 
-      matches_regexp(/^https?:\/\/(?:www\.)?(?:(?:\w)+\.)?(github)\.com[\:\d]*(\/[^\/]+){2}\/tree/)
+      matches_domain("github.com", "www.github.com")
       always_https
+
+      def self.matches_path(path)
+        path.match?(%r{^/[\w\-]+/[\w\-]+/tree/})
+      end
 
       private
 
@@ -26,14 +30,10 @@ module Onebox
         if fragment
           fragment = Addressable::URI.unencode(fragment)
 
-          if html_doc.css('.Box.md')
-            # For links to markdown docs
-            node = html_doc.css('a.anchor').find { |n| n['href'] == "##{fragment}" }
+          # For links to markdown and rdoc
+          if html_doc.css(".Box.md, .Box.rdoc").present?
+            node = html_doc.css("a.anchor").find { |n| n["href"] == "##{fragment}" }
             subtitle = node&.parent&.text
-          elsif html_doc.css('.Box.rdoc')
-            # For links to rdoc docs
-            node = html_doc.css('h3').find { |n| n['id'] == "user-content-#{fragment.downcase}" }
-            subtitle = node&.css('text()')&.first&.text
           end
 
           title = "#{title} - #{subtitle}" if subtitle
@@ -44,12 +44,12 @@ module Onebox
           title: Onebox::Helpers.truncate(title, 250),
           path: display_path,
           description: display_description,
-          favicon: get_favicon
+          favicon: get_favicon,
         }
       end
 
       def extract_path(root, max_length)
-        path = url.split('#')[0].split('?')[0]
+        path = url.split("#")[0].split("?")[0]
         path = path["#{root}/tree/".length..-1]
 
         return unless path
